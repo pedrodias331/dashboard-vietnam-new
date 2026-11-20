@@ -1,10 +1,26 @@
 # Vietnam’s economy
 
-Eight economic indicators at their published frequencies. The date slider filters the charts from January 2015 onward. Each card’s latest observation and refresh status refer to the full loaded series. Months, quarters, and survey years use period-end dates for plotting. Decisions and market closes use their actual dates.
+A Streamlit dashboard for eight economic indicators. The date slider filters the charts from January 2015 onward. Each card shows its latest loaded observation, the publisher release or update date when available, and separate refresh timestamps.
+
+## Update your existing app
+
+1. Replace `app.py`, `requirements.txt`, and `README.md` at the root of the GitHub branch connected to Streamlit Community Cloud.
+2. Keep `app.py` as the entry point and use Python 3.12. For a new deployment, select the repository and branch in **Create app**, enter `app.py`, and choose Python 3.12 in **Advanced settings**.
+3. Open the updated app and select **Refresh now**. If you already run the external scheduler, update its checkout and reinstall the requirements there too. The app reads version 1 snapshots, and the next scheduler run writes version 2 with the exchange rate. You can keep your existing `SNAPSHOT_URL`.
+
+## When a publisher connection fails
+
+GDP, core CPI, unemployment, merchandise trade, and the refinancing-rate workbook share `nsdp.nso.gov.vn`. One connectivity problem from Community Cloud can affect all five cards. The original error alone does not identify whether the cause was DNS, TLS, an upstream failure, or a temporary connection problem.
+
+The app retries transient failures and now reports the hostname and failure category. It keeps previously validated observations and, on a cold start, can display verified observations bundled in `app.py`. A failed check leaves the last success timestamp unchanged.
+
+If Cloud keeps failing, run the command below from your computer or scheduler host. A successful run there confirms that the publishers are reachable from that machine. Configure the HTTPS snapshot if you want Cloud to use data fetched by that machine.
+
+```bash
+python app.py --refresh /tmp/vietnam-economy.json
+```
 
 ## Run locally
-
-From the directory containing the three repository files, use Python 3.12.
 
 ```bash
 python3.12 -m venv .venv
@@ -13,38 +29,29 @@ python -m pip install -r requirements.txt
 python -m streamlit run app.py
 ```
 
-Keep `.venv`, snapshots, and logs outside Git. To run the same publisher retrieval used by the scheduler, with a writable directory of your choice:
+Keep virtual environments, snapshots, logs, and credentials outside Git.
 
-```bash
-python app.py --refresh /tmp/vietnam-economy.json
-```
+## Refresh settings
 
-## Deploy on Streamlit Community Cloud
-
-1. Create a GitHub repository and commit `app.py`, `requirements.txt`, and `README.md` at its root.
-2. In Streamlit Community Cloud, choose **Create app** and select the repository and branch. Set the main file path to `app.py`.
-3. Under **Advanced settings**, select **Python 3.12**. To enable unattended retrieval, complete the scheduler setup below and enter its `SNAPSHOT_URL` in the app’s **Secrets** settings. You can deploy with publisher retrieval first and add the snapshot URL later.
-4. Select **Deploy**. Open the dashboard, confirm that the cards load, and use **Refresh now** to check publisher access from Community Cloud.
-
-| Setting | Default | Purpose |
-| --- | --- | --- |
-| `REFRESH_SECONDS` | `21600` | Integer number of seconds between active-session checks. Minimum 10. |
-| `SNAPSHOT_URL` | Unset | HTTPS URL for the scheduler’s JSON snapshot. |
-
-Use shell environment variables locally and top-level TOML settings in Community Cloud. Replace the example hostname with the one you configure for the scheduler.
+Set environment variables in your local shell or use top-level TOML settings in the Community Cloud app’s **Secrets** settings. Substitute the real hostname. Omit `SNAPSHOT_URL` for direct publisher retrieval.
 
 ```toml
 REFRESH_SECONDS = "21600"
 SNAPSHOT_URL = "https://economy-data.example.com/snapshot.json"
 ```
 
-The data sources and the snapshot in this setup are public and require no API key. Keep server access credentials in your hosting account or environment and outside the repository.
+- `REFRESH_SECONDS` is the active-session interval in seconds. The default is 21600, or six hours. The minimum is 10.
+- A **cache TTL** defines how long cached data is fresh. Elapsed time alone performs no retrieval. The app uses shared Streamlit process state and an elapsed-time check.
+- The **active-session timer** checks whether refresh is due. It reads a fresh scheduled snapshot when configured, or checks publishers directly when needed. **Refresh now** bypasses the interval and checks publishers directly.
+- The **unattended schedule** runs independently of Streamlit viewers. It saves a JSON snapshot and appends publisher results to a log. A partial failure preserves the valid data and returns a nonzero exit status.
+- On a Streamlit restart, the app can recover data from the scheduler snapshot. Without a snapshot, it starts with the bundled observations and fetches again. Any additional bond closes previously held only in memory are lost. A manual UI check does not write to the scheduler.
+- The displayed observation, publication, and refresh timestamps are distinct. No other series is converted using the exchange rate.
 
-## Schedule unattended retrieval
+## Enable unattended refresh
 
-Use a separate, always-on Ubuntu 24.04 host with a persistent disk, outbound HTTPS access, and a public DNS name. Point the hostname at the server and allow inbound TCP ports 80 and 443 for Caddy. The example assumes a login named `ubuntu` and a dedicated hostname. Replace the Git URL and hostname, and adjust `/home/ubuntu` in the cron entry if your account differs.
+Use an always-on Ubuntu 24.04 host with a persistent disk. Point a dedicated DNS hostname at the server, allow inbound TCP 80 and 443, and allow outbound HTTPS. Replace the example repository and hostname. The cron example assumes the Linux account is `ubuntu`.
 
-1. Sign in to the host as `ubuntu`. Install the services, clone the repository, and create the Python environment.
+1. Install the services and create the scheduler environment.
 
    ```bash
    sudo apt-get update
@@ -55,7 +62,7 @@ Use a separate, always-on Ubuntu 24.04 host with a persistent disk, outbound HTT
    sudo install -d -m 0755 -o "$(id -un)" /var/www/vietnam-economy
    ```
 
-2. Generate the initial snapshot. The log stays in the scheduler user’s home directory. The snapshot is stored outside the checkout and survives ordinary restarts of the scheduler host.
+2. Create the initial snapshot and inspect the log.
 
    ```bash
    "$HOME/vietnam-economy-venv/bin/python" "$HOME/vietnam-economy/app.py" \
@@ -64,7 +71,7 @@ Use a separate, always-on Ubuntu 24.04 host with a persistent disk, outbound HTT
    tail -n 8 "$HOME/vietnam-economy-refresh.log"
    ```
 
-3. On the dedicated host, set `/etc/caddy/Caddyfile` to the following configuration with your real hostname. Only the snapshot path is served.
+3. On the dedicated host, configure `/etc/caddy/Caddyfile` with your hostname.
 
    ```caddyfile
    economy-data.example.com {
@@ -84,66 +91,46 @@ Use a separate, always-on Ubuntu 24.04 host with a persistent disk, outbound HTT
    curl -fsS https://economy-data.example.com/snapshot.json | python3.12 -m json.tool
    ```
 
-4. Run `crontab -e` as `ubuntu` and add this line. The schedule runs at minute 11 every six hours in the host’s timezone. `flock` prevents overlapping scheduled writers. Keep manual invocations on the scheduler host under the same lock after enabling cron.
+4. Run `crontab -e` as `ubuntu` and add this line. It runs at minute 11 every six hours in the host’s timezone. Change the `/home/ubuntu` paths if needed. Use the same lock for manual scheduler-host runs after enabling cron.
 
    ```cron
    11 */6 * * * /usr/bin/flock -n /home/ubuntu/vietnam-economy-refresh.lock /home/ubuntu/vietnam-economy-venv/bin/python /home/ubuntu/vietnam-economy/app.py --refresh /var/www/vietnam-economy/snapshot.json >> /home/ubuntu/vietnam-economy-refresh.log 2>&1
    ```
 
-5. Set `SNAPSHOT_URL` in Community Cloud to the HTTPS URL tested in step 3. To verify unattended execution, close the dashboard and wait for the next scheduled time. Check that the log gained a new set of attempts and that the HTTPS snapshot contains those timestamps. Reopen the dashboard and compare the per-series timestamps with the snapshot.
+5. Set `SNAPSHOT_URL` in Community Cloud to the verified HTTPS endpoint. Close the dashboard and wait for the next scheduled time. Check for new log entries in `~/vietnam-economy-refresh.log` and matching attempt timestamps in the HTTPS snapshot. Reopen the dashboard and compare the card timestamps with the snapshot.
 
-Change both `REFRESH_SECONDS` and the cron expression if you want both schedules to use a different cadence. When updating the deployed code, update the checkout and dependencies on the scheduler host too.
+Snapshots contain public economic observations. The HTTPS endpoint serves only `snapshot.json`. Logs stay on the scheduler host. Keep the cron expression and `REFRESH_SECONDS` in sync if you change the cadence.
 
-## Refresh and failure behavior
+## Indicator definitions and verification
 
-- A **cache TTL** controls how long cached results can be reused. Expiration alone performs no retrieval. The app uses `st.cache_resource` for shared process state and an elapsed-time freshness check. Failed attempts are throttled by the same interval.
-- The **active-session timer** uses `st.fragment` to check whether refresh is due. On initial load or when due, the app reads the HTTPS snapshot if configured. Fresh attempt timestamps allow it to use that snapshot. It fetches publishers directly when the snapshot is unavailable or due. **Refresh now** bypasses the interval and checks the publishers immediately.
-- The **unattended schedule** runs the same retrieval code on the external host via cron. It works independently of Community Cloud’s uptime and viewer sessions. It writes the snapshot atomically and appends logs to `~/vietnam-economy-refresh.log`. The CLI returns a nonzero status for a partial failure while publishing the valid series and failure status.
-- Each source’s success time advances only after a fetched response is parsed and validated. Unchanged observations qualify. A failed source check retains existing rows and their success time. The page-level timestamp is the most recent success across the cards. The cards show their own successes and attempts so partial failures remain visible.
-- Dashboard checks maintain process-local state. If the Streamlit worker restarts, it can recover data from the scheduler snapshot. Without a snapshot, it fetches again and any previously collected bond closes held only in memory are lost. Manual UI checks do not write to the scheduler host.
-- Observation periods, source publication or dataset-update dates when supplied, and UTC refresh timestamps are distinct. Rates and prices use the source currencies and units described below. The app performs no foreign-exchange conversion.
-
-## Indicator sources and coverage
-
-| Indicator | Series and method | Coverage in the verified run |
+| Indicator | Publisher and observed value | Dashboard value and coverage |
 | --- | --- | --- |
-| Real GDP growth | NSO quarterly `NGDP_R_PA_XDC`. Releases publish official headline growth figures. For a refreshable history, the app computes `100 × (GDP[t] / GDP[t−4] − 1)` from the official workbook. Both levels must come from the same quarterly sheet and price base. The 2026 Q3 amount is the individual quarter, as checked against the separate quarterly headline. The chart breaks at the switch from 2010 to 2020 constant prices. Workbook revisions can change earlier growth rates. [Workbook](https://nsdp.nso.gov.vn/GSO-chung/Tu%E1%BA%A5n%20Anh/excel%20chung/GDP_VNM.xlsx) | 2015 Q1–2026 Q3 |
-| Core CPI inflation | NSO monthly `PCPICO_PC_PP_PT`. Uses the workbook’s published year-over-year percentage change. NSO excludes staple and fresh foods, energy, and administered items including education and health services. The workbook uses the 2019 CPI base through October 2025 and the 2024 base from November 2025. [Workbook](https://nsdp.nso.gov.vn/GSO-chung/Tu%E1%BA%A5n%20Anh/excel%20chung/CPI_VNM.xlsx), [NSO definition in the October release, footnote 3](https://www.nso.gov.vn/wp-content/uploads/2026/11/CPI-chi-so-gia-vang-va-chi-so-gia-do-la-My-thang-Muoi-va-10-thang-nam-2026.pdf) | August 2020–October 2026 |
-| SBV refinancing rate | Monthly end-of-period `FIR_PA`, plus effective-date steps for Decisions 950 and 1123. The newer SBV Excel and SDMX links on the Vietnamese NSDP returned an error page in testing. The app can recheck the historical workbook and announcements. A dependable feed for the current policy rate remains unavailable, and the dashboard labels this limitation. [NSDP](https://nsdp.nso.gov.vn/), [archive](https://nsdp.nso.gov.vn/GSO-chung/tieng%20anh/excel/sbv/INR_Vietnam%202019.xlsx), [May decision](https://en.baochinhphu.vn/sbv-continues-cutting-regulatory-interest-rates-111230524155951848.htm), [June decision](https://en.baochinhphu.vn/central-bank-cuts-regulatory-interest-rate-111230616172123401.htm) | January 2015–May 2019 month-ends, plus two 2023 decisions |
-| 10-year government bond yield | ADB AsianBondsOnline’s Vietnam VND 10-year secondary-market closing yield to maturity. ADB is the public publisher of this display and identifies Bloomberg as its primary Market Watch supplier. HNX’s transaction page was unreachable from the test host, and a suitable historical benchmark download was unverified. The app reads ADB’s public Market Watch table and accumulates captured closes. An outage can leave a gap in history. [Market Watch](https://asianbondsonline.adb.org/vietnam/), [methodology](https://asianbondsonline.adb.org/market_watch_specs.php?market=country#govt_bonds) | One close at initial load |
-| Coffee price | The NSO trade workbook reviewed for Vietnam provides coffee export values and quantities, which could produce an export unit value. A refreshable Vietnamese farm-gate price history was unverified. The World Bank Pink Sheet provides the ICO Robustas benchmark, an international ex-dock measure covering New York and Le Havre/Marseilles. The app uses the monthly nominal USD/kg column directly. [World Bank download page](https://www.worldbank.org/en/research/commodity-markets), [ICO definitions and market data](https://ico.org/resources/public-market-information/) | January 2015–October 2026 |
-| Merchandise trade balance | Official NSO merchandise summary, `TXG_FOB_USD` minus `TMG_CIF_USD`, divided by 1,000 to express USD billions. Both legs use the same table, period and unadjusted reporting basis. Exports are FOB and imports are CIF. Positive values are surpluses. The workbook flags January 2018 onward as preliminary. Months without a usable pair remain gaps. [Workbook](https://nsdp.nso.gov.vn/GSO-chung/Tu%E1%BA%A5n%20Anh/excel%20chung/MET_VNM.xlsx) | 118 paired months, January 2015–October 2026 |
-| National working-age unemployment | NSO `LUR_PT`, national percentage of the working-age labor force who were without work, seeking and available. The lower threshold is age 15, and the upper limit follows the applicable working-age definition. The statutory normal retirement ages in 2026 were 61 years 6 months for men and 57 years for women. The workbook marks 2026 Q3 as preliminary. [Workbook](https://nsdp.nso.gov.vn/GSO-chung/Tu%E1%BA%A5n%20Anh/excel%20chung/LMI_VNM.xlsx), [retirement-age schedule](https://baochinhphu.vn/quy-dinh-moi-ve-tuoi-nghi-huu-102283105.htm) | 2016 Q1–2026 Q3 |
-| Gini index | World Bank WDI `SI.POV.GINI`, household consumption inequality on a 0–100 scale. The PIP records identify national household survey observations and `welfare_type=consumption`. Null years stay empty and the chart uses points. [WDI series](https://data.worldbank.org/indicator/SI.POV.GINI?locations=VN), [PIP record for 2022](https://api.worldbank.org/pip/v1/pip?country=VNM&year=2022&povline=3&fill_gaps=false) | Survey years 2016, 2018, 2020 and 2022 |
+| Real GDP growth. Quarterly `NGDP_R_PA_XDC`. Growth is `100 × (current real GDP / real GDP four quarters earlier − 1)`, using the two individual quarters from the same constant-price sheet. NSO can revise the estimates. | [NSO quarterly report](https://www.nso.gov.vn/tin-tuc-thong-ke/2026/10/bao-cao-tinh-hinh-kinh-te-xa-hoi-quy-iii-va-9-thang-nam-2026/), 2026 Q3, estimated **9.95% YoY**. | **9.948% YoY** from 3,004,778.442597 and 2,732,908.972376 billion VND at 2020 prices, rounding to 9.95%. Loaded 2015 Q1–2026 Q3. [Workbook](https://nsdp.nso.gov.vn/GSO-chung/Tu%E1%BA%A5n%20Anh/excel%20chung/GDP_VNM.xlsx) |
+| Core CPI. Monthly official YoY rate excluding staple and fresh foods, energy, and administered items including health and education services. The current workbook changed CPI bases in November 2025. | [NSO March 2019 release](https://www.nso.gov.vn/en/data-and-statistics/2019/11/cpi-gold-and-usd-price-indexes-march-2019/), **1.84% YoY**. [NSO October 2026 release](https://www.nso.gov.vn/wp-content/uploads/2026/11/CPI-chi-so-gia-vang-va-chi-so-gia-do-la-My-thang-Muoi-va-10-thang-nam-2026.pdf), **4.04% YoY**. | **1.840%** and **4.036%** respectively. The historical workbook supplies April 2015–February 2019, monthly releases bridge March 2019–July 2020, and the current workbook begins in August 2020. [Historical workbook](https://nsdp.nso.gov.vn/GSO-chung/tieng%20anh/excel/gso/TKG.%20CPI_Vietnam.xlsx), [current workbook](https://nsdp.nso.gov.vn/GSO-chung/Tu%E1%BA%A5n%20Anh/excel%20chung/CPI_VNM.xlsx) |
+| Refinancing rate. Monthly `FIR_PA` archive and nine verified SBV effective-date changes in 2019–2023. | [Government Portal reporting SBV Decision 1123](https://en.baochinhphu.vn/central-bank-cuts-regulatory-interest-rate-111230616172123401.htm), effective June 19, 2023, **4.5% per year**. | **4.500% per year** on the same date. The live check rechecks the archive. A reliable current-rate feed remains unavailable. The chart ends at the last verified decision. [Archive](https://nsdp.nso.gov.vn/GSO-chung/tieng%20anh/excel/sbv/INR_Vietnam%202019.xlsx) |
+| 10-year bond yield. ADB Market Watch VND secondary-market closing yield to maturity. HNX transaction data were unreachable from the test host, and a suitable historical benchmark download was unverified. | [ADB Market Watch](https://asianbondsonline.adb.org/vietnam/), November 18, 2026 close, **4.462%**. [ADB curve](https://asianbondsonline.adb.org/charts/government_bond_yields.php?economies=VN), **4.040%** end-2025 and **4.465%** end-October 2026 at verification. Both pages roll forward. | Same values, read directly. Two reference points and one dated close start the chart. A persistent snapshot accumulates newly captured closes. [Methodology](https://asianbondsonline.adb.org/market_watch_specs.php?market=country#govt_bonds) |
+| Coffee. Monthly nominal USD/kg, World Bank Pink Sheet’s ICO Robustas indicator for New York and Le Havre/Marseilles ex-dock markets. A refreshable Vietnam farm-gate history was unverified. | [World Bank monthly workbook](https://thedocs.worldbank.org/en/doc/74e8be41ceb20fa0da750cda2f6b9e4e-0050012026/related/CMO-Historical-Data-Monthly.xlsx), October 2026, **USD 3.63/kg**. | **USD 3.630/kg**, directly. The [ICO report](https://ico.org/documents/cy2026-27/cmr-1026-e.pdf) gives 164.19 US cents/lb, about USD 3.620/kg, for the same month. The app consistently uses the World Bank vintage. |
+| Merchandise trade. Monthly exports FOB `TXG_FOB_USD` minus imports CIF `TMG_CIF_USD`, using the same unadjusted NSO table. Positive means surplus. The workbook flags data from January 2018 as preliminary. | [NSO October report](https://www.nso.gov.vn/en/data-and-statistics/2026/11/report-socio-economic-performance-in-october-and-10-months-of-2026/), October 2026, preliminary **USD 7.31 billion surplus**. | **USD 7.307 billion**, from `(64,670.426411 − 57,363.689155) / 1,000`. Rounds to USD 7.31 billion. Missing paired months stay blank. |
+| Unemployment. Quarterly NSO `LUR_PT`, national working-age labor force. Lower age threshold is 15. Upper limits follow the applicable working-age definition. In 2026 normal statutory retirement ages were 61 years 6 months for men and 57 years for women. | [NSO quarterly press release](https://www.nso.gov.vn/du-lieu-va-so-lieu-thong-ke/2026/10/thong-cao-bao-chi-tinh-hinh-kinh-te-xa-hoi-quy-iii-va-9-thang-nam-2026/), 2026 Q3, **2.22%**. | **2.218%**, rounding to 2.22%. Preliminary per the workbook. [Retirement-age schedule](https://baochinhphu.vn/quy-dinh-moi-ve-tuoi-nghi-huu-102283105.htm) |
+| Exchange rate. BIS `M.VN.VND.E`, monthly end-of-period. VND per USD is the number of dong per one US dollar. A rise means a weaker dong. | [BIS series](https://data.bis.org/topics/XRU/BIS%2CWS_XRU%2C1.0/M.VN.VND.E), August 2026, **25,610 VND per USD**. | **25,610 VND per USD**, directly from the [CSV API](https://stats.bis.org/api/v1/data/BIS,WS_XRU,1.0/M.VN.VND.E). Verified coverage January 2015–August 2026. |
 
-## Observation verification
+Examples of the core CPI bridge are the [April 2019 report](https://www.nso.gov.vn/en/data-and-statistics/2019/10/report-social-and-economic-situation-four-months-and-in-april-2019/), [October 2019 table](https://www.nso.gov.vn/wp-content/uploads/2019/11/CPI-10-2019-E01.pdf), [May 2020 report](https://www.nso.gov.vn/en/data-and-statistics/2020/07/socio-economic-situation-in-the-first-5-months-of-2020/) and [July 2020 release](https://www.nso.gov.vn/en/data-and-statistics/2020/07/consumer-price-index-gold-and-usd-price-indexes-july-2020/). These are individual monthly YoY observations.
 
-Dashboard values below come from the real refresh. The interface displays three decimals. Calculations use full available source precision.
-
-| Indicator | Publisher and original source | Observation | Published value | Dashboard value and comparison |
-| --- | --- | --- | --- | --- |
-| Real GDP growth | [NSO quarterly report](https://www.nso.gov.vn/tin-tuc-thong-ke/2026/10/bao-cao-tinh-hinh-kinh-te-xa-hoi-quy-iii-va-9-thang-nam-2026/) | 2026 Q3 | 9.95% YoY, estimated | 9.948% YoY. Calculated from 3,004,778.442597 and 2,732,908.972376 billion VND at 2020 prices. Rounds to 9.95%. |
-| Core CPI inflation | [NSO October CPI release, table 2](https://www.nso.gov.vn/wp-content/uploads/2026/11/CPI-chi-so-gia-vang-va-chi-so-gia-do-la-My-thang-Muoi-va-10-thang-nam-2026.pdf) | October 2026 | 4.04% YoY | 4.036% YoY from the workbook’s monthly column, rounding to 4.04%. |
-| Refinancing rate | [Vietnam Government Portal reporting SBV Decision 1123](https://en.baochinhphu.vn/central-bank-cuts-regulatory-interest-rate-111230616172123401.htm) | Effective June 19, 2023 | 4.5% per year | 4.500% per year, same effective date. Verification covers this decision. Current-rate verification is pending because the newer linked SBV feeds returned error pages. |
-| 10-year yield | [ADB Vietnam Market Watch](https://asianbondsonline.adb.org/vietnam/) and [ADB yield curve view](https://asianbondsonline.adb.org/charts/government_bond_yields.php?economies=VN) | November 18, 2026 close | 4.462% per year | 4.462% per year, directly from the 10-year cell. The live Market Watch link rolls forward. |
-| Coffee | [World Bank Pink Sheet monthly workbook used in the run](https://thedocs.worldbank.org/en/doc/74e8be41ceb20fa0da750cda2f6b9e4e-0050012026/related/CMO-Historical-Data-Monthly.xlsx), `Monthly Prices`, `Coffee, Robusta` | October 2026 | USD 3.63/kg | USD 3.630/kg, directly from the World Bank workbook. The [ICO report](https://ico.org/documents/cy2026-27/cmr-1026-e.pdf) separately shows 164.19 US cents/lb, approximately USD 3.620/kg. The publications differ by about USD 0.01/kg for this month. The dashboard uses the World Bank vintage consistently. |
-| Trade balance | [NSO October report](https://www.nso.gov.vn/en/data-and-statistics/2026/11/report-socio-economic-performance-in-october-and-10-months-of-2026/) | October 2026 | USD 7.31 billion surplus, preliminary | USD 7.307 billion, from `(64,670.426411 − 57,363.689155) / 1,000`. Rounds to USD 7.31 billion. |
-| Unemployment | [NSO quarterly press release, labor section](https://www.nso.gov.vn/du-lieu-va-so-lieu-thong-ke/2026/10/thong-cao-bao-chi-tinh-hinh-kinh-te-xa-hoi-quy-iii-va-9-thang-nam-2026/) | 2026 Q3 | 2.22% of working-age labor force | 2.218%, rounding to 2.22%. The workbook flags it as preliminary. |
-| Gini | [World Bank WDI](https://data.worldbank.org/indicator/SI.POV.GINI?locations=VN) and [PIP country profile](https://pip.worldbank.org/country-profiles/VNM) | 2022 survey | WDI 36.1 on 0–100. PIP 36.09. | 36.100 from WDI. The more precise PIP figure rounds to 36.1 at WDI precision. |
+Sources for the additional refinancing-rate steps are the government announcements for [September 2019](https://en.baochinhphu.vn/central-bank-slashes-interest-rates-applicable-since-sep-16-11136132.htm), [March 2020](https://baochinhphu.vn/giam-hang-loat-lai-suat-dieu-hanh-tu-ngay-17-3-102269631.htm), [May 2020](https://en.baochinhphu.vn/central-bank-lower-interest-rates-11138191.htm), [October 2020](https://en.baochinhphu.vn/central-bank-slashes-benchmark-rates-in-favor-of-economic-recovery-11139411.htm), [September 2022](https://baochinhphu.vn/ngan-hang-nha-nuoc-dieu-chinh-mot-so-muc-lai-suat-tu-ngay-23-9-102220922175228897.htm), [October 2022](https://baochinhphu.vn/ngan-hang-nha-nuoc-viet-nam-dieu-chinh-cac-muc-lai-suat-dieu-hanh-102221024210117723.htm), [April 2023](https://xaydungchinhsach.chinhphu.vn/ngan-hang-nha-nuoc-tiep-tuc-giam-lai-suat-119230401064608221.htm), [May 2023](https://en.baochinhphu.vn/sbv-continues-cutting-regulatory-interest-rates-111230524155951848.htm), and [June 2023](https://en.baochinhphu.vn/central-bank-cuts-regulatory-interest-rate-111230616172123401.htm).
 
 ## Execution evidence
 
-Python 3.12.14, using the pinned dependencies. The following is stdout from a real local run of `python app.py --refresh clean.json` against live publishers, with a new snapshot path. UTC timestamps correspond to the evening of November 19, 2026 in U.S. Central time. Counts show observations loaded from January 2015 onward. The policy result confirms retrieval of the archive and decisions.
+The updated workspace build ran against live publishers under Python 3.12.14. The excerpt is from that run. Counts include retained archival observations. Timestamps are UTC, corresponding to the evening of November 19, 2026 in U.S. Central time. The chat version expresses the bundled history as readable tables, rounded where needed. Live loaders use the precision provided by the sources.
 
 ```text
-2026-11-20T01:07:40+00:00 gdp [NSO] OK observations=47 latest=2026-Q3
-2026-11-20T01:07:39+00:00 core [NSO] OK observations=75 latest=2026-10
-2026-11-20T01:07:44+00:00 policy [SBV archive + Government Portal] OK limited archive observations=55 latest=2023-06-19
-2026-11-20T01:07:34+00:00 bond [ADB AsianBondsOnline] OK observations=1 latest=2026-11-18
-2026-11-20T01:07:35+00:00 coffee [World Bank / ICO] OK observations=142 latest=2026-10
-2026-11-20T01:07:41+00:00 trade [NSO] OK observations=118 latest=2026-10
-2026-11-20T01:07:55+00:00 jobs [NSO] OK observations=43 latest=2026-Q3
-2026-11-20T01:07:40+00:00 gini [World Bank WDI] OK observations=4 latest=2022
+2026-11-20T01:58:45+00:00 gdp [NSO] OK observations=47 latest=2026-Q3
+2026-11-20T01:58:44+00:00 core [NSO] OK observations=139 latest=2026-10
+2026-11-20T01:58:43+00:00 policy [SBV archive + Government Portal] OK limited archive observations=62 latest=2023-06-19
+2026-11-20T01:58:37+00:00 bond [ADB AsianBondsOnline] OK observations=3 latest=2026-11-18
+2026-11-20T01:58:38+00:00 coffee [World Bank / ICO] OK observations=142 latest=2026-10
+2026-11-20T01:58:45+00:00 trade [NSO] OK observations=118 latest=2026-10
+2026-11-20T01:59:34+00:00 jobs [NSO] OK observations=43 latest=2026-Q3
+2026-11-20T01:58:44+00:00 fx [BIS] OK observations=140 latest=2026-08
 ```
 
-Streamlit’s local `AppTest` rendered eight charts without exceptions and exercised the manual refresh button, which ran a second live publisher check. `pip check` found no dependency conflicts. The six-hour fragment timing was not observed over a full interval. The CLI retrieval and snapshot write were verified locally. Cron execution, public HTTPS serving, and Community Cloud retrieval and restart recovery remain pending because the scheduler host and Community Cloud app were not provisioned.
+A separate Streamlit AppTest on that build simulated a failure at every publisher. All eight charts rendered from bundled data on initial load and after a manual retry. Version 1 snapshot loading was also tested. Community Cloud retrieval and unattended cron execution remain unverified.
